@@ -3,8 +3,10 @@ import logging
 import logging.handlers
 import os
 import sys
+import json
 
 import requests
+import torch
 
 from fastchat.constants import LOGDIR
 
@@ -24,7 +26,7 @@ def build_logger(logger_name, logger_filename):
 
     # Set the format of root handlers
     if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.INFO, encoding='utf-8')
     logging.getLogger().handlers[0].setFormatter(formatter)
 
     # Redirect stdout and stderr to loggers
@@ -80,13 +82,15 @@ class StreamToLogger(object):
             # By default sys.stdout.write() expects '\n' newlines and then
             # translates them so this is still cross platform.
             if line[-1] == '\n':
-                self.logger.log(self.log_level, line.rstrip())
+                encoded_message = line.encode('utf-8', 'ignore').decode('utf-8')
+                self.logger.log(self.log_level, encoded_message.rstrip())
             else:
                 self.linebuf += line
 
     def flush(self):
         if self.linebuf != '':
-            self.logger.log(self.log_level, self.linebuf.rstrip())
+            encoded_message = self.linebuf.encode('utf-8', 'ignore').decode('utf-8')
+            self.logger.log(self.log_level, encoded_message.rstrip())
         self.linebuf = ''
 
 
@@ -119,6 +123,22 @@ def violates_moderation(text):
 
     return flagged
 
+# Flan-t5 trained with HF+FSDP saves corrupted  weights for shared embeddings,
+# Use this function to make sure it can be correctly loaded.
+def clean_flant5_ckpt(ckpt_path):
+    index_file = os.path.join(ckpt_path, "pytorch_model.bin.index.json")
+    index_json = json.load(open(index_file, "r"))
+
+    weightmap = index_json["weight_map"]
+
+    share_weight_file = weightmap["shared.weight"]
+    share_weight = torch.load(os.path.join(ckpt_path, share_weight_file))["shared.weight"]
+
+    for weight_name in ["decoder.embed_tokens.weight","encoder.embed_tokens.weight"]:
+        weight_file = weightmap[weight_name]
+        weight = torch.load(os.path.join(ckpt_path, weight_file))
+        weight[weight_name] = share_weight
+        torch.save(weight, os.path.join(ckpt_path, weight_file))
 
 def pretty_print_semaphore(semaphore):
     if semaphore is None:
